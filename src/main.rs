@@ -1,21 +1,19 @@
 use axum::{
-    extract::State,
+    extract::Json,
+    response::IntoResponse,
     routing::post,
-    Json, Router,
+    Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, net::SocketAddr, sync::Arc};
-use tokio::sync::RwLock;
+use std::{collections::HashMap, fs, net::SocketAddr};
 
-
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 struct SubQuestion {
     question: String,
     options: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
 struct Diagnosis {
     diagnosis: String,
     symptoms: Vec<String>,
@@ -27,93 +25,64 @@ struct Diagnosis {
 #[derive(Debug, Deserialize)]
 struct SymptomInput {
     symptoms: Vec<String>,
+    follow_ups: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
 struct DiagnosisResult {
     diagnosis: String,
-    confidence: f64,
+    likelihood: f64,
     recommended_action: String,
 }
 
-#[derive(Clone)]
-struct AppState {
-    data: Arc<RwLock<Vec<Diagnosis>>>,
+fn load_data(file_path: &str) -> Vec<Diagnosis> {
+    let file_content = fs::read_to_string(file_path)
+        .expect("Failed to read JSON file");
+    serde_json::from_str(&file_content)
+        .expect("Failed to parse JSON data")
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let data = load_data("data.json")?;
-    let shared_state = AppState {
-        data: Arc::new(RwLock::new(data)),
-    };
+async fn diagnose(Json(payload): Json<SymptomInput>) -> impl IntoResponse {
+    let data = load_data("data.json");
+    let symptoms = payload.symptoms;
+    let follow_ups = payload.follow_ups.unwrap_or_default();
 
-    let app = Router::new()
-        .route("/diagnose", post(handle_diagnosis))
-        .with_state(shared_state);
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    println!("Server running at http://{}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
-}
-
-
-async fn handle_diagnosis(
-    State(state): State<AppState>,
-    Json(payload): Json<SymptomInput>,
-) -> Json<Vec<DiagnosisResult>> {
-    let input_symptoms: Vec<String> = payload
-        .symptoms
-        .iter()
-        .map(|s| s.to_lowercase())
-        .collect();
-
-    let data = state.data.read().await;
     let mut results = Vec::new();
 
-    for diagnosis in data.iter() {
-        let total = diagnosis.symptoms.len();
-        if total == 0 {
-            continue;
+    for diagnosis in &data {
+        if let Some(sub_questions) = &diagnosis.sub_questions {
+            for symptom in &symptoms {
+                if let Some(sub_question) = sub_questions.get(symptom) {
+                    if let Some(answer) = follow_ups.get(symptom) {
+                        if let Some(sub_diagnoses) = sub_question.options.get(answer) {
+                            for diag in sub_diagnoses {
+                                results.push(DiagnosisResult {
+                                    diagnosis: diag.clone(),
+                                    likelihood: 100.0,
+                                    recommended_action: diagnosis.recommended_action.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
-
-        let matched = diagnosis
-            .symptoms
-            .iter()
-            .filter(|s| input_symptoms.contains(&s.to_lowercase()))
-            .count();
-
-        if matched == 0 {
-            continue;
-        }
-
-        let mut score = (matched as f64 / total as f64) * 100.0;
-
-        let required_present = diagnosis
-            .required_symptoms
-            .iter()
-            .all(|r| input_symptoms.contains(&r.to_lowercase()));
-        if required_present && !diagnosis.required_symptoms.is_empty() {
-            score += 10.0;
-        }
-
-        results.push(DiagnosisResult {
-            diagnosis: diagnosis.diagnosis.clone(),
-            confidence: score,
-            recommended_action: diagnosis.recommended_action.clone(),
-        });
     }
 
-    results.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
     Json(results)
 }
 
-fn load_data(file_path: &str) -> Result<Vec<Diagnosis>, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(file_path)?;
-    let data: Vec<Diagnosis> = serde_json::from_str(&content)?;
-    Ok(data)
+#[tokio::main]
+async fn main() {
+    let app = Router::new().route("/diagnose", post(diagnose));
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    println!("Server running on http://{}", addr);
+
+    axum::serve(
+        tokio::net::TcpListener::bind(addr).await.unwrap(),
+        app,
+    )
+    .await
+    .unwrap();
 }
