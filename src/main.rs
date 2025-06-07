@@ -74,10 +74,16 @@ async fn diagnose(Json(payload): Json<SymptomInput>) -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() {
-    let app = Router::new().route("/diagnose", post(diagnose));
+    // ✅ Use Railway's dynamic port if available
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3000);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    println!("Server running on http://{}", addr);
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    println!("Server running at http://{}", addr);
+
+    let app = axum::Router::new().route("/diagnose", axum::routing::post(diagnose));
 
     axum::serve(
         tokio::net::TcpListener::bind(addr).await.unwrap(),
@@ -86,3 +92,4 @@ async fn main() {
     .await
     .unwrap();
 }
+
